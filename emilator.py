@@ -72,7 +72,7 @@ class Emilator(object):
         if (full_width_reg_value is None and
                 (reg_info.extend == 'NoExtend' or
                  reg_info.offset != 0)):
-            raise exceptions.UndefinedError(
+            raise errors.UndefinedError(
                 'Register {} not defined'.format(
                     reg_info.full_width_reg
                 )
@@ -106,7 +106,7 @@ class Emilator(object):
         full_reg_value = self._regs.get(reg_info.full_width_reg)
 
         if full_reg_value is None:
-            raise exceptions.UndefinedError(
+            raise errors.UndefinedError(
                 'Register {} not defined'.format(
                     register
                 )
