@@ -1,6 +1,6 @@
 import math
 
-import exceptions
+import errors
 
 def sign_extend(value, bits):
     sign_bit = 1 << (bits - 1)

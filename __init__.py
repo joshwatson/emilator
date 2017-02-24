@@ -1,2 +1,2 @@
 from emilator import *
-import exceptions
+import errors
