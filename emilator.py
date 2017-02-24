@@ -53,39 +53,45 @@ class Emilator(object):
     def set_register_value(self, register, value):
         reg_info = self._view.arch.regs[register]
 
-        if value >= (1 << reg_info.size * 8):
+        # normalize value to be unsigned
+        if value < 0:
+            value = value + (1 << reg_info.size * 8)
+
+        if 0 > value >= (1 << reg_info.size * 8):
             raise ValueError('value is out of range')
+
+        if register == reg_info.full_width_reg:
+            self._regs[register] = value
+            return
 
         full_width_reg_info = self._view.arch.regs[reg_info.full_width_reg]
         full_width_reg_value = self._regs.get(full_width_reg_info.full_width_reg)
 
         # XXX: The RegisterInfo.extend field currently holds a string for
         #      for built-in Architectures.
-        if full_width_reg_value is None:
-            if register == reg_info.full_width_reg:
-                full_width_reg_value = 0
-            elif (reg_info.extend == 'NoExtend' or
-                  reg_info.offset != 0):
-                raise exceptions.UndefinedError(
-                    'Register {} not defined'.format(
-                        reg_info.full_width_reg
-                    )
+        if (full_width_reg_value is None and
+                (reg_info.extend == 'NoExtend' or
+                 reg_info.offset != 0)):
+            raise exceptions.UndefinedError(
+                'Register {} not defined'.format(
+                    reg_info.full_width_reg
                 )
+            )
 
         if reg_info.extend == 'ZeroExtendToFullWidth':
             full_width_reg_value = value
 
         elif reg_info.extend == 'SignExtendToFullWidth':
             full_width_reg_value = (
-                (value ^ (1<<reg_info.size-1)) -
-                (1<<reg_info.size-1) +
-                (1<<full_width_reg_info.size)
+                (value ^ ((1 << reg_info.size * 8) - 1)) -
+                ((1 << reg_info.size * 8) - 1) +
+                (1 << full_width_reg_info.size * 8)
             )
 
         elif reg_info.extend == 'NoExtend':
             # mask off the value that will be replaced
-            mask = (1 << reg_info.size) - 1
-            full_mask = (1 << full_width_reg_info.size) - 1
+            mask = (1 << reg_info.size * 8) - 1
+            full_mask = (1 << full_width_reg_info.size * 8) - 1
             reg_bits = mask << (reg_info.offset * 8)
 
             full_width_reg_value &= full_mask ^ reg_bits
