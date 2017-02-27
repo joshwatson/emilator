@@ -1,20 +1,49 @@
-import math
+from collections import defaultdict
+
+import binaryninja
 
 import errors
+import handlers
 
 def sign_extend(value, bits):
     sign_bit = 1 << (bits - 1)
     return (value & (sign_bit - 1)) - (value & sign_bit)
 
 class Emilator(object):
-    def __init__(self, view, function):
-        self._view = view
+    def __init__(self, function, view=None):
+        if not isinstance(function, binaryninja.LowLevelILFunction):
+            raise TypeError('function must be a LowLevelILFunction')
+
         self._function = function
+
+        if view is None:
+            view = binaryninja.BinaryView()
+
+        self._view = view
+
         self._regs = {}
         self._flags = {}
         self._segments = {}
-        self._function_hooks = {}
-        self._instr_hooks = {}
+        self._function_hooks = defaultdict(list)
+        self._instr_hooks = defaultdict(list)
+        self.handlers = handlers.Handlers(self)
+        self.instr_index = 0
+
+    @property
+    def function(self):
+        return self._function
+
+    @property
+    def registers(self):
+        return dict(self._regs)
+
+    @property
+    def function_hooks(self):
+        return dict(self._function_hooks)
+
+    @property
+    def instr_hooks(self):
+        return defaultdict(list, self._instr_hooks)
 
     def map_memory(self, base=None, size=0x1000, flags=0):
         if base is None:
@@ -51,7 +80,15 @@ class Emilator(object):
         pass
 
     def set_register_value(self, register, value):
-        reg_info = self._view.arch.regs[register]
+        # If it's a temp register, just set the value no matter what.
+        # Maybe this will be an issue eventually, maybe not.
+        if (isinstance(register, (int, long)) and 
+                binaryninja.LLIL_REG_IS_TEMP(register)):
+            self._regs[register] = value
+
+        arch = self._function.arch
+
+        reg_info = arch.regs[register]
 
         # normalize value to be unsigned
         if value < 0:
@@ -64,7 +101,7 @@ class Emilator(object):
             self._regs[register] = value
             return
 
-        full_width_reg_info = self._view.arch.regs[reg_info.full_width_reg]
+        full_width_reg_info = arch.regs[reg_info.full_width_reg]
         full_width_reg_value = self._regs.get(full_width_reg_info.full_width_reg)
 
         # XXX: The RegisterInfo.extend field currently holds a string for
@@ -101,7 +138,20 @@ class Emilator(object):
 
 
     def get_register_value(self, register):
-        reg_info = self._view.arch.regs[register]
+        if (isinstance(register, int) and
+                binaryninja.LLIL_REG_IS_TEMP(register)):
+            reg_value = self._regs.get(register)
+
+            if reg_value is None:
+                raise errors.UndefinedError(
+                    'Register {} not defined'.format(
+                        binaryninja.LLIL_GET_TEMP_REG_INDEX(register)
+                    )
+                )
+
+            return reg_value
+
+        reg_info = self._function.arch.regs[register]
 
         full_reg_value = self._regs.get(reg_info.full_width_reg)
 
@@ -128,9 +178,21 @@ class Emilator(object):
     def get_flag_value(self, flag):
         pass
 
-    def execute(self, instr_index):
-        # Start execution from a given IL instruction address.
-        pass
+    def execute_instruction(self):
+        # Execute a the current IL instruction
+        instruction = self._function[self.instr_index]
+
+        # increment to next instruction (can be changed by instruction)
+        self.instr_index += 1
+
+        self.handlers[instruction.operation](instruction)
+
+    def run(self):
+        while True:
+            try:
+                yield self.execute_instruction()
+            except IndexError:
+                raise StopIteration()
 
     def _find_available_segment(self, size=0x1000, align=1):
         new_segment = None
@@ -153,3 +215,27 @@ class Emilator(object):
 
         return new_segment
 
+if __name__ == '__main__':
+    il = binaryninja.LowLevelILFunction(binaryninja.Architecture['x86_64'])
+    emi = Emilator(il)
+
+    emi.set_register_value('rbx', -1)
+
+    print '[+] Initial Register State:'
+    for r,v in emi.registers.iteritems():
+        print '\t{}:\t{:x}'.format(r, v)
+
+    il.append(il.set_reg(8, 'rax', il.const(8, 0xbadf00d)))
+    il.append(il.set_reg(8, 'rbx', il.reg(8, 'rax')))
+
+    print '[+] Instructions:'
+    print '\t'+repr(il[0])
+    print '\t'+repr(il[1])
+
+    print '[+] Executing instructions...'
+    for i in emi.run():
+        print '\tInstruction completed.'
+
+    print '[+] Final Register State:'
+    for r,v in emi.registers.iteritems():
+        print '\t{}:\t{:x}'.format(r, v)
