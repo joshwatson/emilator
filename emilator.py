@@ -1,9 +1,16 @@
+import struct
 from collections import defaultdict
 
-import binaryninja
+from binaryninja import (
+    BinaryView, LowLevelILFunction, SegmentFlag, LLIL_REG_IS_TEMP, Endianness,
+    Architecture, LLIL_GET_TEMP_REG_INDEX, BinaryViewType
+)
 
 import errors
 import handlers
+import memory
+
+fmt = {1: 'B', 2: 'H', 4: 'L', 8: 'Q'}
 
 def sign_extend(value, bits):
     sign_bit = 1 << (bits - 1)
@@ -11,19 +18,26 @@ def sign_extend(value, bits):
 
 class Emilator(object):
     def __init__(self, function, view=None):
-        if not isinstance(function, binaryninja.LowLevelILFunction):
+        if not isinstance(function, LowLevelILFunction):
             raise TypeError('function must be a LowLevelILFunction')
 
         self._function = function
 
         if view is None:
-            view = binaryninja.BinaryView()
+            view = BinaryView()
 
         self._view = view
 
         self._regs = {}
         self._flags = {}
-        self._segments = {}
+        self._memory = memory.Memory(function.arch.address_size)
+
+        for segment in view.segments:
+            self._memory.map(
+                segment.start, segment.length, segment.flags,
+                view.read(segment.start, segment.length)
+            )
+
         self._function_hooks = defaultdict(list)
         self._instr_hooks = defaultdict(list)
         self.handlers = handlers.Handlers(self)
@@ -32,6 +46,10 @@ class Emilator(object):
     @property
     def function(self):
         return self._function
+
+    @property
+    def mapped_memory(self):
+        return list(self._memory)
 
     @property
     def registers(self):
@@ -45,25 +63,15 @@ class Emilator(object):
     def instr_hooks(self):
         return defaultdict(list, self._instr_hooks)
 
-    def map_memory(self, base=None, size=0x1000, flags=0):
-        if base is None:
-            base = self._find_available_segment(size)
-
-        self._view.add_user_segment(base, size, 0, 0, flags)
-
-        self._segments[base] = self._view.get_segment_at(base)
-
-        return base
+    def map_memory(self,
+        start=None,
+        length=0x1000,
+        flags=SegmentFlag.SegmentReadable | SegmentFlag.SegmentWritable,
+        data=None):
+        return self._memory.map(start, length, flags, data)
 
     def unmap_memory(self, base, size):
-        segment = self._view.get_segment_at(base)
-
-        # XXX: track unmapping a part of a segment
-        del self._segments[segment.start]
-
-        # XXX: this doesn't actually seem to work right now.
-        #      https://github.com/Vector35/binaryninja-api/issues/631
-        self._view.remove_user_segment(base, size)
+        raise errors.UnimplementedError('Unmapping memory not implemented')
 
     def register_function_hook(self, function, hook):
         pass
@@ -83,7 +91,7 @@ class Emilator(object):
         # If it's a temp register, just set the value no matter what.
         # Maybe this will be an issue eventually, maybe not.
         if (isinstance(register, (int, long)) and 
-                binaryninja.LLIL_REG_IS_TEMP(register)):
+                LLIL_REG_IS_TEMP(register)):
             self._regs[register] = value
 
         arch = self._function.arch
@@ -139,13 +147,13 @@ class Emilator(object):
 
     def get_register_value(self, register):
         if (isinstance(register, int) and
-                binaryninja.LLIL_REG_IS_TEMP(register)):
+                LLIL_REG_IS_TEMP(register)):
             reg_value = self._regs.get(register)
 
             if reg_value is None:
                 raise errors.UndefinedError(
                     'Register {} not defined'.format(
-                        binaryninja.LLIL_GET_TEMP_REG_INDEX(register)
+                        LLIL_GET_TEMP_REG_INDEX(register)
                     )
                 )
 
@@ -177,6 +185,40 @@ class Emilator(object):
 
     def get_flag_value(self, flag):
         pass
+
+    def read_memory(self, addr, length):
+        if length not in fmt:
+            raise ValueError('read length must be in (1,2,4,8)')
+
+        # XXX: Handle sizes > 8 bytes
+        pack_fmt = (
+            # XXX: Endianness string bug
+            '<' if self._function.arch.endianness == 'LittleEndian'
+            else ''
+        ) + fmt[length]
+
+        if addr not in self._memory:
+            raise errors.MemoryAccessError(
+                'Address {:x} is not valid.'.format(addr)
+            )
+
+        try:
+            return struct.unpack(
+                pack_fmt, self._memory.read(addr, length)
+            )[0]
+        except:
+            raise errors.MemoryAccessError(
+                'Could not read memory at {:x}'.format(addr)
+            )
+
+    def write_memory(self, addr, data):
+        # XXX: This is terribly implemented
+        if addr not in self._memory:
+            raise errors.MemoryAccessError(
+                'Address {:x} is not valid.'.format(addr)
+            )
+
+        self._memory.write(addr, data)
 
     def execute_instruction(self):
         # Execute a the current IL instruction
@@ -216,26 +258,34 @@ class Emilator(object):
         return new_segment
 
 if __name__ == '__main__':
-    il = binaryninja.LowLevelILFunction(binaryninja.Architecture['x86_64'])
+    il = LowLevelILFunction(Architecture['x86_64'])
     emi = Emilator(il)
 
     emi.set_register_value('rbx', -1)
 
+    print '[+] Mapping memory at 0x1000 (size: 0x1000)...'
+    emi.map_memory(0x1000, flags=SegmentFlag.SegmentReadable)
+
+    # print '[+] Writing {:x} to 0x1000...'.format(0xbadf00d)
+    # emi.write_memory(0x1000, struct.pack('<L', 0xbadf00d))
+
     print '[+] Initial Register State:'
-    for r,v in emi.registers.iteritems():
+    for r, v in emi.registers.iteritems():
         print '\t{}:\t{:x}'.format(r, v)
 
-    il.append(il.set_reg(8, 'rax', il.const(8, 0xbadf00d)))
-    il.append(il.set_reg(8, 'rbx', il.reg(8, 'rax')))
+    il.append(il.set_reg(8, 'rax', il.const(8, 0x1000)))
+    il.append(il.store(4, il.reg(8, 'rax'), il.const(4, 0xbadf00d)))
+    il.append(il.set_reg(8, 'rbx', il.load(8, il.reg(8, 'rax'))))
 
     print '[+] Instructions:'
     print '\t'+repr(il[0])
     print '\t'+repr(il[1])
+    print '\t'+repr(il[2])
 
     print '[+] Executing instructions...'
     for i in emi.run():
         print '\tInstruction completed.'
 
     print '[+] Final Register State:'
-    for r,v in emi.registers.iteritems():
+    for r, v in emi.registers.iteritems():
         print '\t{}:\t{:x}'.format(r, v)
