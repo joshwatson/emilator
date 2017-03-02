@@ -1,7 +1,10 @@
+import struct
 from types import FunctionType
 
 from binaryninja import LowLevelILOperation as Op
 from collections import defaultdict
+
+fmt = {1: 'B', 2: 'H', 4: 'L', 8: 'Q'}
 
 class Handlers(object):
     _handlers = defaultdict(
@@ -47,3 +50,22 @@ def _const(expr, emilator):
 @Handlers.add(Op.LLIL_REG)
 def _reg(expr, emilator):
     return emilator.get_register_value(expr.src)
+
+@Handlers.add(Op.LLIL_LOAD)
+def _load(expr, emilator):
+    addr = emilator.handlers[expr.src.operation](expr.src)
+
+    return emilator.read_memory(addr, expr.size)
+
+@Handlers.add(Op.LLIL_STORE)
+def _store(expr, emilator):
+    addr = emilator.handlers[expr.dest.operation](expr.dest)
+    value = emilator.handlers[expr.src.operation](expr.src)
+
+    pack_fmt = (
+            # XXX: Endianness string bug
+            '<' if emilator.function.arch.endianness == 'LittleEndian'
+            else ''
+        ) + fmt[expr.size]
+
+    emilator.write_memory(addr, struct.pack(pack_fmt, value))
