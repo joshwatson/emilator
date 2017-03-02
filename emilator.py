@@ -266,9 +266,6 @@ if __name__ == '__main__':
     print '[+] Mapping memory at 0x1000 (size: 0x1000)...'
     emi.map_memory(0x1000, flags=SegmentFlag.SegmentReadable)
 
-    # print '[+] Writing {:x} to 0x1000...'.format(0xbadf00d)
-    # emi.write_memory(0x1000, struct.pack('<L', 0xbadf00d))
-
     print '[+] Initial Register State:'
     for r, v in emi.registers.iteritems():
         print '\t{}:\t{:x}'.format(r, v)
