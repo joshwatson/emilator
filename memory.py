@@ -52,7 +52,7 @@ class Memory(object):
             if self._ranges[range_index].start == address:
                 return True
         except IndexError:
-            return False
+            pass
 
         if range_index == 0:
             return False
@@ -101,7 +101,7 @@ class Memory(object):
         # XXX: Handle split ranges
         idx = bisect.bisect_left(self._ranges, address)
         
-        if self._ranges[idx].start > address:
+        if idx == len(self._ranges) or self._ranges[idx].start > address:
             idx -= 1
 
         range = self._ranges[idx]

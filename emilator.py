@@ -64,10 +64,10 @@ class Emilator(object):
         return defaultdict(list, self._instr_hooks)
 
     def map_memory(self,
-        start=None,
-        length=0x1000,
-        flags=SegmentFlag.SegmentReadable | SegmentFlag.SegmentWritable,
-        data=None):
+                   start=None,
+                   length=0x1000,
+                   flags=SegmentFlag.SegmentReadable | SegmentFlag.SegmentWritable,
+                   data=None):
         return self._memory.map(start, length, flags, data)
 
     def unmap_memory(self, base, size):
@@ -211,12 +211,25 @@ class Emilator(object):
                 'Could not read memory at {:x}'.format(addr)
             )
 
-    def write_memory(self, addr, data):
+    def write_memory(self, addr, data, length=None):
         # XXX: This is terribly implemented
         if addr not in self._memory:
             raise errors.MemoryAccessError(
                 'Address {:x} is not valid.'.format(addr)
             )
+
+        if isinstance(data, (int, long)):
+            if length not in (1, 2, 4, 8):
+                raise KeyError('length is not 1, 2, 4, or 8.')
+
+            # XXX: Handle sizes > 8 bytes
+            pack_fmt = (
+                # XXX: Endianness string bug
+                '<' if self._function.arch.endianness == 'LittleEndian'
+                else ''
+            ) + fmt[length]
+
+            data = struct.pack(pack_fmt, data)
 
         self._memory.write(addr, data)
 
@@ -234,7 +247,10 @@ class Emilator(object):
             try:
                 yield self.execute_instruction()
             except IndexError:
-                raise StopIteration()
+                if self.instr_index >= len(self.function):
+                    raise StopIteration()
+                else:
+                    raise
 
     def _find_available_segment(self, size=0x1000, align=1):
         new_segment = None
@@ -262,6 +278,7 @@ if __name__ == '__main__':
     emi = Emilator(il)
 
     emi.set_register_value('rbx', -1)
+    emi.set_register_value('rsp', 0x1000)
 
     print '[+] Mapping memory at 0x1000 (size: 0x1000)...'
     emi.map_memory(0x1000, flags=SegmentFlag.SegmentReadable)
@@ -270,14 +287,14 @@ if __name__ == '__main__':
     for r, v in emi.registers.iteritems():
         print '\t{}:\t{:x}'.format(r, v)
 
-    il.append(il.set_reg(8, 'rax', il.const(8, 0x1000)))
-    il.append(il.store(4, il.reg(8, 'rax'), il.const(4, 0xbadf00d)))
+    il.append(il.push(8, il.const(8, 0xbadf00d)))
+    il.append(il.push(8, il.const(8, 0x1000)))
+    il.append(il.set_reg(8, 'rax', il.pop(8)))
     il.append(il.set_reg(8, 'rbx', il.load(8, il.reg(8, 'rax'))))
 
     print '[+] Instructions:'
-    print '\t'+repr(il[0])
-    print '\t'+repr(il[1])
-    print '\t'+repr(il[2])
+    for i in range(len(emi.function)):
+        print '\t'+repr(il[i])
 
     print '[+] Executing instructions...'
     for i in emi.run():

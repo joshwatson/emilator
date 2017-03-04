@@ -4,8 +4,6 @@ from types import FunctionType
 from binaryninja import LowLevelILOperation as Op
 from collections import defaultdict
 
-fmt = {1: 'B', 2: 'H', 4: 'L', 8: 'Q'}
-
 class Handlers(object):
     _handlers = defaultdict(
         lambda: lambda i: (_ for _ in ()).throw(NotImplementedError(i.operation))
@@ -62,10 +60,32 @@ def _store(expr, emilator):
     addr = emilator.handlers[expr.dest.operation](expr.dest)
     value = emilator.handlers[expr.src.operation](expr.src)
 
-    pack_fmt = (
-            # XXX: Endianness string bug
-            '<' if emilator.function.arch.endianness == 'LittleEndian'
-            else ''
-        ) + fmt[expr.size]
+    emilator.write_memory(addr, value, expr.size)
 
-    emilator.write_memory(addr, struct.pack(pack_fmt, value))
+@Handlers.add(Op.LLIL_PUSH)
+def _push(expr, emilator):
+    sp = emilator.function.arch.stack_pointer
+
+    value = emilator.handlers[expr.src.operation](expr.src)
+
+    sp_value = emilator.get_register_value(sp)
+
+    emilator.write_memory(sp_value, value, expr.size)
+
+    sp_value += expr.size
+
+    emilator.set_register_value(sp, sp_value)
+
+@Handlers.add(Op.LLIL_POP)
+def _pop(expr, emilator):
+    sp = emilator.function.arch.stack_pointer
+
+    sp_value = emilator.get_register_value(sp)
+
+    sp_value -= expr.size
+
+    value = emilator.read_memory(sp_value, expr.size)
+
+    emilator.set_register_value(sp, sp_value)
+
+    return value
