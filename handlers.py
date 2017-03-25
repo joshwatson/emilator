@@ -6,7 +6,7 @@ from collections import defaultdict
 
 class Handlers(object):
     _handlers = defaultdict(
-        lambda: lambda i: (_ for _ in ()).throw(NotImplementedError(i.operation))
+        lambda: lambda i,j: (_ for _ in ()).throw(NotImplementedError(i.operation))
     )
 
     def __init__(self, emilator):
@@ -89,3 +89,41 @@ def _pop(expr, emilator):
     emilator.set_register_value(sp, sp_value)
 
     return value
+
+@Handlers.add(Op.LLIL_GOTO)
+def _goto(expr, emilator):
+    emilator.instr_index = expr.dest
+
+@Handlers.add(Op.LLIL_IF)
+def _if(expr, emilator):
+    condition = emilator.handlers[expr.condition.operation](expr.condition)
+
+    if condition:
+        emilator.instr_index = expr.true
+    else:
+        emilator.instr_index = expr.false
+
+@Handlers.add(Op.LLIL_CMP_NE)
+def _cmp_ne(expr, emilator):
+    left = emilator.handlers[expr.left.operation](expr.left)
+    right = emilator.handlers[expr.right.operation](expr.right)
+
+    return left != right
+
+@Handlers.add(Op.LLIL_CMP_E)
+def _cmp_e(expr, emilator):
+    left = emilator.handlers[expr.left.operation](expr.left)
+    right = emilator.handlers[expr.right.operation](expr.right)
+
+    return left == right
+
+@Handlers.add(Op.LLIL_ADD)
+def _add(expr, emilator):
+    left = emilator.handlers[expr.left.operation](expr.left)
+    right = emilator.handlers[expr.right.operation](expr.right)
+
+    return left + right
+
+@Handlers.add(Op.LLIL_RET)
+def _ret(expr, emilator):
+    raise StopIteration
