@@ -1,23 +1,26 @@
 import struct
-from collections import defaultdict
 
 from binaryninja import (
-    BinaryView, LowLevelILFunction, SegmentFlag, LLIL_REG_IS_TEMP, Endianness,
-    Architecture, LLIL_GET_TEMP_REG_INDEX, BinaryViewType
+    BinaryView, LowLevelILFunction, SegmentFlag, LLIL_REG_IS_TEMP,
+    Architecture, LLIL_GET_TEMP_REG_INDEX, ILRegister
 )
 
 import errors
-import handlers
 import memory
+import llilvisitor
 
 fmt = {1: 'B', 2: 'H', 4: 'L', 8: 'Q'}
+
 
 def sign_extend(value, bits):
     sign_bit = 1 << (bits - 1)
     return (value & (sign_bit - 1)) - (value & sign_bit)
 
-class Emilator(object):
+
+class Emilator(llilvisitor.LLILVisitor):
     def __init__(self, function, view=None):
+        super(Emilator, self).__init__()
+
         if not isinstance(function, LowLevelILFunction):
             raise TypeError('function must be a LowLevelILFunction')
 
@@ -38,9 +41,7 @@ class Emilator(object):
                 view.read(segment.start, segment.length)
             )
 
-        self._function_hooks = defaultdict(list)
-        self._instr_hooks = defaultdict(list)
-        self.handlers = handlers.Handlers(self)
+        self._function_hooks = {}
         self.instr_index = 0
 
     @property
@@ -61,7 +62,7 @@ class Emilator(object):
 
     @property
     def instr_hooks(self):
-        return defaultdict(list, self._instr_hooks)
+        return dict(self._hooks)
 
     def map_memory(self,
                    start=None,
@@ -94,6 +95,9 @@ class Emilator(object):
                 LLIL_REG_IS_TEMP(register)):
             self._regs[register] = value
 
+        if isinstance(register, ILRegister):
+            register = register.name
+
         arch = self._function.arch
 
         reg_info = arch.regs[register]
@@ -107,7 +111,7 @@ class Emilator(object):
 
         if register == reg_info.full_width_reg:
             self._regs[register] = value
-            return
+            return value
 
         full_width_reg_info = arch.regs[reg_info.full_width_reg]
         full_width_reg_value = self._regs.get(full_width_reg_info.full_width_reg)
@@ -144,6 +148,7 @@ class Emilator(object):
 
         self._regs[full_width_reg_info.full_width_reg] = full_width_reg_value
 
+        return full_width_reg_value
 
     def get_register_value(self, register):
         if (isinstance(register, int) and
@@ -158,6 +163,9 @@ class Emilator(object):
                 )
 
             return reg_value
+
+        if isinstance(register, ILRegister):
+            register = register.name
 
         reg_info = self._function.arch.regs[register]
 
@@ -234,13 +242,13 @@ class Emilator(object):
         self._memory.write(addr, data)
 
     def execute_instruction(self):
-        # Execute a the current IL instruction
+        # Execute the current IL instruction
         instruction = self._function[self.instr_index]
 
         # increment to next instruction (can be changed by instruction)
         self.instr_index += 1
 
-        self.handlers[instruction.operation](instruction)
+        self.visit(instruction)
 
     def run(self):
         while True:
@@ -272,6 +280,86 @@ class Emilator(object):
                 break
 
         return new_segment
+
+    def visit_LLIL_SET_REG(self, expr):
+        value = self.visit(expr.src)
+        return self.set_register_value(expr.dest, value)
+
+    def visit_LLIL_CONST(self, expr):
+        return expr.constant
+
+    def visit_LLIL_REG(self, expr):
+        return self.get_register_value(expr.src)
+
+    def visit_LLIL_LOAD(self, expr):
+        addr = self.visit(expr.src)
+        return self.read_memory(addr, expr.size)
+
+    def visit_LLIL_STORE(self, expr):
+        addr = self.visit(expr.dest)
+        value = self.visit(expr.src)
+        return self.write_memory(addr, value, expr.size)
+
+    def visit_LLIL_PUSH(self, expr):
+        sp = self.function.arch.stack_pointer
+
+        value = self.visit(expr.src)
+
+        sp_value = self.get_register_value(sp)
+
+        self.write_memory(sp_value, value, expr.size)
+
+        sp_value += expr.size
+
+        return self.set_register_value(sp, sp_value)
+
+    def visit_LLIL_POP(self, expr):
+        sp = self.function.arch.stack_pointer
+
+        sp_value = self.get_register_value(sp)
+
+        sp_value -= expr.size
+
+        value = self.read_memory(sp_value, expr.size)
+
+        self.set_register_value(sp, sp_value)
+
+        return value
+
+    def visit_LLIL_GOTO(self, expr):
+        self.instr_index = expr.dest
+
+    def visit_LLIL_IF(self, expr):
+        condition = self.visit(expr.condition)
+
+        if condition:
+            self.instr_index = expr.true
+        else:
+            self.instr_index = expr.false
+
+    def visit_LLIL_CMP_NE(self, expr):
+        left = self.visit(expr.left)
+        right = self.visit(expr.right)
+
+        return left != right
+
+    def visit_LLIL_CMP_E(self, expr):
+        left = self.visit(expr.left)
+        right = self.visit(expr.right)
+
+        return left == right
+
+    def visit_LLIL_ADD(self, expr):
+        left = self.visit(expr.left)
+        right = self.visit(expr.right)
+
+        return left + right
+
+    def visit_LLIL_RET(self, expr):
+        # we'll stop for now, but this will need to retrieve the return
+        # address and jump to it.
+        raise StopIteration
+
 
 if __name__ == '__main__':
     il = LowLevelILFunction(Architecture['x86_64'])

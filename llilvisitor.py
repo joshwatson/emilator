@@ -21,3 +21,5 @@ class LLILVisitor(BNILVisitor):
 
         if result is None:
             raise errors.UnimplementedError(expression)
+
+        return result
