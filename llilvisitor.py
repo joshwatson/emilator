@@ -20,6 +20,6 @@ class LLILVisitor(BNILVisitor):
         result = super(LLILVisitor, self).visit(expression)
 
         if result is None:
-            raise errors.UnimplementedError(expression)
+            raise errors.UnimplementedError(expression.operation)
 
         return result

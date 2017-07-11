@@ -106,9 +106,6 @@ class Emilator(llilvisitor.LLILVisitor):
         if value < 0:
             value = value + (1 << reg_info.size * 8)
 
-        if 0 > value >= (1 << reg_info.size * 8):
-            raise ValueError('value is out of range')
-
         if register == reg_info.full_width_reg:
             self._regs[register] = value
             return value
@@ -178,8 +175,10 @@ class Emilator(llilvisitor.LLILVisitor):
                 )
             )
 
+        mask = (1 << reg_info.size * 8) - 1
+
         if register == reg_info.full_width_reg:
-            return full_reg_value
+            return full_reg_value & mask
 
         mask = (1 << reg_info.size * 8) - 1
         reg_bits = mask << (reg_info.offset * 8)
@@ -288,6 +287,9 @@ class Emilator(llilvisitor.LLILVisitor):
     def visit_LLIL_CONST(self, expr):
         return expr.constant
 
+    def visit_LLIL_CONST_PTR(self, expr):
+        return expr.constant
+
     def visit_LLIL_REG(self, expr):
         return self.get_register_value(expr.src)
 
@@ -328,6 +330,7 @@ class Emilator(llilvisitor.LLILVisitor):
 
     def visit_LLIL_GOTO(self, expr):
         self.instr_index = expr.dest
+        return self.instr_index
 
     def visit_LLIL_IF(self, expr):
         condition = self.visit(expr.condition)
@@ -336,6 +339,8 @@ class Emilator(llilvisitor.LLILVisitor):
             self.instr_index = expr.true
         else:
             self.instr_index = expr.false
+
+        return condition
 
     def visit_LLIL_CMP_NE(self, expr):
         left = self.visit(expr.left)
@@ -355,10 +360,35 @@ class Emilator(llilvisitor.LLILVisitor):
 
         return left + right
 
+    def visit_LLIL_AND(self, expr):
+        left = self.visit(expr.left)
+        right = self.visit(expr.right)
+        return left & right
+
+    def visit_LLIL_OR(self, expr):
+        left = self.visit(expr.left)
+        right = self.visit(expr.right)
+        return left | right
+
     def visit_LLIL_RET(self, expr):
         # we'll stop for now, but this will need to retrieve the return
         # address and jump to it.
         raise StopIteration
+
+    def visit_LLIL_CALL(self, expr):
+        target = self.visit(expr.dest)
+
+        target_function = self._view.get_function_at(target)
+
+        if not target_function:
+            self._view.create_user_function(target)
+            self._view.update_analysis_and_wait()
+            target_function = self._view.get_function_at(target)
+
+        self._function = target_function.low_level_il
+        self.instr_index = 0
+
+        return True
 
 
 if __name__ == '__main__':
