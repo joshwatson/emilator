@@ -1,13 +1,12 @@
 import struct
 
-from binaryninja import (
-    BinaryView, LowLevelILFunction, SegmentFlag, LLIL_REG_IS_TEMP,
-    Architecture, LLIL_GET_TEMP_REG_INDEX, ILRegister
-)
-
 import errors
-import memory
 import llilvisitor
+import memory
+from binaryninja import (LLIL_GET_TEMP_REG_INDEX, LLIL_REG_IS_TEMP,
+                         Architecture, BinaryView, Endianness, ILRegister,
+                         ImplicitRegisterExtend, LowLevelILFunction,
+                         SegmentFlag)
 
 fmt = {1: 'B', 2: 'H', 4: 'L', 8: 'Q'}
 
@@ -75,7 +74,7 @@ class Emilator(llilvisitor.LLILVisitor):
         raise errors.UnimplementedError('Unmapping memory not implemented')
 
     def register_function_hook(self, function, hook):
-        pass
+        self._function_hooks[function] = hook
 
     def register_instruction_hook(self, operand, hook):
         # These hooks will be fallen back on if LLIL_UNIMPLEMENTED
@@ -94,9 +93,14 @@ class Emilator(llilvisitor.LLILVisitor):
         if (isinstance(register, (int, long)) and 
                 LLIL_REG_IS_TEMP(register)):
             self._regs[register] = value
+            return value
 
         if isinstance(register, ILRegister):
-            register = register.name
+            if not LLIL_REG_IS_TEMP(register.index):
+                register = register.name
+            else:
+                self._regs[register.index] = value
+                return value
 
         arch = self._function.arch
 
@@ -113,10 +117,8 @@ class Emilator(llilvisitor.LLILVisitor):
         full_width_reg_info = arch.regs[reg_info.full_width_reg]
         full_width_reg_value = self._regs.get(full_width_reg_info.full_width_reg)
 
-        # XXX: The RegisterInfo.extend field currently holds a string for
-        #      for built-in Architectures.
         if (full_width_reg_value is None and
-                (reg_info.extend == 'NoExtend' or
+                (reg_info.extend == ImplicitRegisterExtend.NoExtend or
                  reg_info.offset != 0)):
             raise errors.UndefinedError(
                 'Register {} not defined'.format(
@@ -124,17 +126,17 @@ class Emilator(llilvisitor.LLILVisitor):
                 )
             )
 
-        if reg_info.extend == 'ZeroExtendToFullWidth':
+        if reg_info.extend == ImplicitRegisterExtend.ZeroExtendToFullWidth:
             full_width_reg_value = value
 
-        elif reg_info.extend == 'SignExtendToFullWidth':
+        elif reg_info.extend == ImplicitRegisterExtend.SignExtendToFullWidth:
             full_width_reg_value = (
                 (value ^ ((1 << reg_info.size * 8) - 1)) -
                 ((1 << reg_info.size * 8) - 1) +
                 (1 << full_width_reg_info.size * 8)
             )
 
-        elif reg_info.extend == 'NoExtend':
+        elif reg_info.extend == ImplicitRegisterExtend.NoExtend:
             # mask off the value that will be replaced
             mask = (1 << reg_info.size * 8) - 1
             full_mask = (1 << full_width_reg_info.size * 8) - 1
@@ -162,7 +164,17 @@ class Emilator(llilvisitor.LLILVisitor):
             return reg_value
 
         if isinstance(register, ILRegister):
-            register = register.name
+            if not LLIL_REG_IS_TEMP(register.index):
+                register = register.name
+            else:
+                reg_value = self._regs.get(register.index)
+                if reg_value is None:
+                    raise errors.UndefinedError(
+                        'Register {} not defined'.format(
+                            LLIL_GET_TEMP_REG_INDEX(register)
+                        )
+                    )
+                return reg_value
 
         reg_info = self._function.arch.regs[register]
 
@@ -188,10 +200,13 @@ class Emilator(llilvisitor.LLILVisitor):
         return reg_value
 
     def set_flag_value(self, flag, value):
-        pass
+        self._flags[flag] = value
+        return value
 
     def get_flag_value(self, flag):
-        pass
+        # Assume that any previously unset flag is False
+        value = self._flags.get(flag, False)
+        return value
 
     def read_memory(self, addr, length):
         if length not in fmt:
@@ -200,7 +215,7 @@ class Emilator(llilvisitor.LLILVisitor):
         # XXX: Handle sizes > 8 bytes
         pack_fmt = (
             # XXX: Endianness string bug
-            '<' if self._function.arch.endianness == 'LittleEndian'
+            '<' if self._function.arch.endianness == Endianness.LittleEndian
             else ''
         ) + fmt[length]
 
@@ -232,13 +247,15 @@ class Emilator(llilvisitor.LLILVisitor):
             # XXX: Handle sizes > 8 bytes
             pack_fmt = (
                 # XXX: Endianness string bug
-                '<' if self._function.arch.endianness == 'LittleEndian'
+                '<' if self._function.arch.endianness == Endianness.LittleEndian
                 else ''
             ) + fmt[length]
 
             data = struct.pack(pack_fmt, data)
 
         self._memory.write(addr, data)
+
+        return True
 
     def execute_instruction(self):
         # Execute the current IL instruction
@@ -282,7 +299,8 @@ class Emilator(llilvisitor.LLILVisitor):
 
     def visit_LLIL_SET_REG(self, expr):
         value = self.visit(expr.src)
-        return self.set_register_value(expr.dest, value)
+        self.set_register_value(expr.dest, value)
+        return True
 
     def visit_LLIL_CONST(self, expr):
         return expr.constant
@@ -291,7 +309,8 @@ class Emilator(llilvisitor.LLILVisitor):
         return expr.constant
 
     def visit_LLIL_REG(self, expr):
-        return self.get_register_value(expr.src)
+        value = self.get_register_value(expr.src)
+        return value
 
     def visit_LLIL_LOAD(self, expr):
         addr = self.visit(expr.src)
@@ -300,7 +319,8 @@ class Emilator(llilvisitor.LLILVisitor):
     def visit_LLIL_STORE(self, expr):
         addr = self.visit(expr.dest)
         value = self.visit(expr.src)
-        return self.write_memory(addr, value, expr.size)
+        self.write_memory(addr, value, expr.size)
+        return True
 
     def visit_LLIL_PUSH(self, expr):
         sp = self.function.arch.stack_pointer
@@ -311,7 +331,7 @@ class Emilator(llilvisitor.LLILVisitor):
 
         self.write_memory(sp_value, value, expr.size)
 
-        sp_value += expr.size
+        sp_value -= expr.size
 
         return self.set_register_value(sp, sp_value)
 
@@ -320,7 +340,7 @@ class Emilator(llilvisitor.LLILVisitor):
 
         sp_value = self.get_register_value(sp)
 
-        sp_value -= expr.size
+        sp_value += expr.size
 
         value = self.read_memory(sp_value, expr.size)
 
@@ -354,11 +374,28 @@ class Emilator(llilvisitor.LLILVisitor):
 
         return left == right
 
-    def visit_LLIL_ADD(self, expr):
+    def visit_LLIL_CMP_SLT(self, expr):
         left = self.visit(expr.left)
         right = self.visit(expr.right)
 
-        return left + right
+        if (left & (1 << ((expr.size * 8) - 1))):
+            left = left - (1 << (expr.size * 8))
+
+        if (right & (1 << ((expr.size * 8) - 1))):
+            right = right - (1 << (expr.size * 8))
+
+        return left < right
+
+    def visit_LLIL_CMP_UGT(self, expr):
+        left = self.visit(expr.left)
+        right = self.visit(expr.right)
+        return left > right
+
+    def visit_LLIL_ADD(self, expr):
+        left = self.visit(expr.left)
+        right = self.visit(expr.right)
+        mask = (1 << expr.size * 8) - 1
+        return (left + right) & mask
 
     def visit_LLIL_AND(self, expr):
         left = self.visit(expr.left)
@@ -370,6 +407,20 @@ class Emilator(llilvisitor.LLILVisitor):
         right = self.visit(expr.right)
         return left | right
 
+    def visit_LLIL_SUB(self, expr):
+        left = self.visit(expr.left)
+        right = self.visit(expr.right)
+        return left - right
+
+    def visit_LLIL_SET_FLAG(self, expr):
+        flag = expr.dest.index
+        value = self.visit(expr.src)
+        return self.set_flag_value(flag, value)
+
+    def visit_LLIL_FLAG(self, expr):
+        flag = expr.src.index
+        return self.get_flag_value(flag)
+
     def visit_LLIL_RET(self, expr):
         # we'll stop for now, but this will need to retrieve the return
         # address and jump to it.
@@ -377,6 +428,10 @@ class Emilator(llilvisitor.LLILVisitor):
 
     def visit_LLIL_CALL(self, expr):
         target = self.visit(expr.dest)
+
+        if target in self._function_hooks:
+            self._function_hooks[target](self)
+            return True
 
         target_function = self._view.get_function_at(target)
 
@@ -389,6 +444,31 @@ class Emilator(llilvisitor.LLILVisitor):
         self.instr_index = 0
 
         return True
+
+    def visit_LLIL_SX(self, expr):
+        orig_value = self.visit(expr.src)
+        sign_bit = 1 << ((expr.size * 8) - 1)
+        extend_value = (orig_value & (sign_bit - 1)) - (orig_value & sign_bit)
+        return extend_value
+
+    def visit_LLIL_ZX(self, expr):
+        return self.visit(expr.src)
+
+    def visit_LLIL_XOR(self, expr):
+        left = self.visit(expr.left)
+        right = self.visit(expr.right)
+        return left ^ right
+
+    def visit_LLIL_LSL(self, expr):
+        mask = (1 << expr.size * 8) - 1
+        left = self.visit(expr.left)
+        right = self.visit(expr.right)
+        return (left << right) & mask
+
+    def visit_LLIL_LSR(self, expr):
+        left = self.visit(expr.left)
+        right = self.visit(expr.right)
+        return left >> right
 
 
 if __name__ == '__main__':
