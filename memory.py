@@ -84,14 +84,15 @@ class Memory(object):
         try:
             range = self._ranges[idx]
         except IndexError:
-            raise errors.MemoryAccessError()
+            raise errors.MemoryAccessError(address=address)
 
         if range.start <= address < range.length:
             if range.start + length > range.length:
                 raise errors.MemoryAccessError(
                     '{[{:x},{:x}] is not valid range of memory'.format(
                         address, address+length
-                    )
+                    ),
+                    address=address
                 )
         return range.data[address-range.start:address+length-range.start].tobytes()
 
@@ -111,7 +112,8 @@ class Memory(object):
                 raise errors.MemoryAccessError(
                     '{[{:x},{:x}] is not valid range of memory'.format(
                         address, address+length
-                    )
+                    ),
+                    address=address
                 )
 
         range.data[address-range.start:address+length-range.start] = value
